@@ -1,5 +1,5 @@
 [project]
-name = "ads-mcp"
+name = "tiktok-ads-mcp"
 version = "0.1.0"
 description = "Python MCP server for TikTok Ads Manager (Marketing API) – management and analytics."
 readme = "README.md"
