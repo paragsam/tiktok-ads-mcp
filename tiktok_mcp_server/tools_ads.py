@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional
 
 from mcp.server.fastmcp import FastMCP
 
+from .entity_cache import get_entity_cache
 from .models import AdSummary
 from .tiktok_client import TikTokApiError, get_client
 
@@ -56,6 +57,9 @@ def register_tools(mcp: FastMCP) -> None:
             raw = client.list_ads(advertiser_id, campaign_id=campaign_id, adgroup_id=adgroup_id, status=status)
         except TikTokApiError as exc:
             raise RuntimeError(f"Failed to list ads: {exc}") from exc
+
+        items = raw.get("list", []) if isinstance(raw, dict) else []
+        get_entity_cache().feed_ads(items)
 
         ads = [a.model_dump() for a in _summarise_ads(raw)]
         return {"ads": ads, "raw": raw}

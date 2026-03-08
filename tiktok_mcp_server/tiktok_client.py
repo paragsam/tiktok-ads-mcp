@@ -9,6 +9,7 @@ The goal of this module is clarity:
 
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
@@ -17,54 +18,42 @@ import httpx
 
 from .config import TikTokConfig, get_config
 
-# Logger for HTTP request/response debugging. Level can be set via
+# Logger for HTTP request/response. Level can be set via
 # logging.getLogger("tiktok_mcp_server.http").setLevel(logging.DEBUG)
 logger = logging.getLogger("tiktok_mcp_server.http")
 
-# Header names (case-insensitive) whose values should be redacted in logs
-_REDACT_HEADERS = frozenset({"access-token", "authorization", "cookie"})
+_BODY_TRUNCATE = 200
 
 
-def _redact_headers(headers: httpx.Headers) -> Dict[str, str]:
-    """Return a dict of header name -> value, with sensitive values redacted."""
-    out: Dict[str, str] = {}
-    for name, value in headers.items():
-        key = name.lower()
-        if key in _REDACT_HEADERS and value:
-            out[name] = "***REDACTED***"
-        else:
-            out[name] = value
-    return out
-
-
-def _format_headers_for_log(headers: Dict[str, str]) -> str:
-    """Format headers as multi-line string for logging."""
-    return "\n    ".join(f"{k}: {v}" for k, v in sorted(headers.items()))
-
+def _truncate(body: bytes) -> bytes:
+    if len(body) <= _BODY_TRUNCATE:
+        return body
+    return body[:_BODY_TRUNCATE] + b"..."
 
 def _log_request(request: httpx.Request) -> None:
-    """Event hook: log outgoing request method, URL, and full headers."""
-    safe_headers = _redact_headers(request.headers)
+    """Event hook: log method, URL, and request body (truncated)."""
+    body = request.content or b""
     logger.info(
-        "TikTok API request: %s %s\n  Request headers:\n    %s",
+        "TikTok API request: %s %s  body=%s",
         request.method,
         request.url,
-        _format_headers_for_log(safe_headers),
+        _truncate(body),
     )
-    if request.content:
-        logger.debug("  Request body: %s", request.content[:2000] if len(request.content) > 2000 else request.content)
 
 
 def _log_response(response: httpx.Response) -> None:
-    """Event hook: log response status and full response headers."""
-    safe_headers = _redact_headers(response.headers)
+    """Event hook: log response body only (truncated)."""
+    try:
+        response.read()  # consume stream so content is available for logging and later .json()
+    except Exception:
+        pass
+    body = response.content or b""
     logger.info(
-        "TikTok API response: %s %s -> %d %s\n  Response headers:\n    %s",
+        "TikTok API response: %s %s -> %d  body=%s",
         response.request.method,
         response.request.url,
         response.status_code,
-        response.reason_phrase or "",
-        _format_headers_for_log(safe_headers),
+        _truncate(body),
     )
 
 
@@ -157,12 +146,23 @@ class TikTokClient:
         Maps to GET /campaign/get/
         """
         params: Dict[str, Any] = {}
+        filtering: Dict[str, Any] = {}
         if status:
-            params["filtering"] = {"campaign_status": status}
+            filtering["campaign_status"] = status
         if search_term:
-            filtering = params.setdefault("filtering", {})
             filtering["campaign_name"] = search_term
+        if filtering:
+            params["filtering"] = json.dumps(filtering)
 
+        response = self._client.get("/campaign/get/", params=self._with_advertiser(advertiser_id, params))
+        return self._handle_response(response)
+
+    def get_campaign(self, advertiser_id: str, campaign_id: str) -> Any:
+        """
+        Get a single campaign by ID. Returns same shape as list_campaigns (data with list, page_info).
+        Maps to GET /campaign/get/ with filtering campaign_ids.
+        """
+        params: Dict[str, Any] = {"filtering": json.dumps({"campaign_ids": [campaign_id]})}
         response = self._client.get("/campaign/get/", params=self._with_advertiser(advertiser_id, params))
         return self._handle_response(response)
 
@@ -221,8 +221,17 @@ class TikTokClient:
 
         params: Dict[str, Any] = {}
         if filtering:
-            params["filtering"] = filtering
+            params["filtering"] = json.dumps(filtering)
 
+        response = self._client.get("/adgroup/get/", params=self._with_advertiser(advertiser_id, params))
+        return self._handle_response(response)
+
+    def get_adgroup(self, advertiser_id: str, adgroup_id: str) -> Any:
+        """
+        Get a single ad group by ID. Returns same shape as list_adgroups (data with list, page_info).
+        Maps to GET /adgroup/get/ with filtering adgroup_ids.
+        """
+        params: Dict[str, Any] = {"filtering": json.dumps({"adgroup_ids": [adgroup_id]})}
         response = self._client.get("/adgroup/get/", params=self._with_advertiser(advertiser_id, params))
         return self._handle_response(response)
 
@@ -237,15 +246,37 @@ class TikTokClient:
         response = self._client.post("/adgroup/create/", json=body)
         return self._handle_response(response)
 
-    def update_adgroup(self, advertiser_id: str, payload: Dict[str, Any]) -> Any:
+    def update_adgroup(
+        self,
+        advertiser_id: str,
+        payload: Dict[str, Any],
+        *,
+        campaign_automation_type: str = "MANUAL",
+    ) -> Any:
         """
         Update an ad group.
 
-        Maps to POST /adgroup/update/
+        Endpoint is chosen by campaign_automation_type:
+        - MANUAL: POST /adgroup/update/
+        - SMART_PLUS: POST /spc/adgroup/update/
+        - UPGRADED_SMART_PLUS: POST /smart_plus/adgroup/update/
+        See: https://business-api.tiktok.com/portal/docs?id=1843314894279682
         """
         body = dict(payload)
         body.setdefault("advertiser_id", advertiser_id)
-        response = self._client.post("/adgroup/update/", json=body)
+        at = (campaign_automation_type or "").strip().upper()
+        if at == "MANUAL":
+            path = "/adgroup/update/"
+        elif at in ("SMART_PLUS", "UPGRADED_SMART_PLUS"):
+            path = "/smart_plus/adgroup/update/"
+        else:
+            path = "/adgroup/update/"
+        logger.info(
+            "update_adgroup called with campaign_automation_type=%r (endpoint=%s)",
+            campaign_automation_type,
+            path,
+        )
+        response = self._client.post(path, json=body)
         return self._handle_response(response)
 
     def update_adgroup_status(self, advertiser_id: str, payload: Dict[str, Any]) -> Any:
@@ -284,7 +315,7 @@ class TikTokClient:
 
         params: Dict[str, Any] = {}
         if filtering:
-            params["filtering"] = filtering
+            params["filtering"] = json.dumps(filtering)
 
         response = self._client.get("/ad/get/", params=self._with_advertiser(advertiser_id, params))
         return self._handle_response(response)

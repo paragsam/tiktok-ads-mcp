@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional
 
 from mcp.server.fastmcp import FastMCP
 
+from .entity_cache import get_entity_cache
 from .models import CampaignSummary
 from .tiktok_client import TikTokApiError, get_client
 
@@ -68,6 +69,9 @@ def register_tools(mcp: FastMCP) -> None:
         except TikTokApiError as exc:
             # Re-raise with a friendly message for the MCP client.
             raise RuntimeError(f"Failed to list campaigns: {exc}") from exc
+
+        items = raw.get("list", []) if isinstance(raw, dict) else []
+        get_entity_cache().feed_campaigns(items)
 
         campaigns = [c.model_dump() for c in _summarise_campaigns(raw)]
         return {"campaigns": campaigns, "raw": raw}

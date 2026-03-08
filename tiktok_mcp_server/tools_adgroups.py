@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional
 
 from mcp.server.fastmcp import FastMCP
 
+from .entity_cache import get_entity_cache
 from .models import AdGroupSummary
 from .tiktok_client import TikTokApiError, get_client
 
@@ -54,6 +55,9 @@ def register_tools(mcp: FastMCP) -> None:
         except TikTokApiError as exc:
             raise RuntimeError(f"Failed to list ad groups: {exc}") from exc
 
+        items = raw.get("list", []) if isinstance(raw, dict) else []
+        get_entity_cache().feed_adgroups(items)
+
         adgroups = [g.model_dump() for g in _summarise_adgroups(raw)]
         return {"adgroups": adgroups, "raw": raw}
 
@@ -97,6 +101,29 @@ def register_tools(mcp: FastMCP) -> None:
 
         return raw
 
+    def _resolve_campaign_automation_type(advertiser_id: str, adgroup_id: str) -> str:
+        """Resolve campaign_automation_type (MANUAL | SMART_PLUS | UPGRADED_SMART_PLUS) from cache or by fetching adgroup then campaign."""
+        cache = get_entity_cache()
+        campaign_id = cache.get_adgroup_campaign(adgroup_id)
+        if campaign_id is None:
+            client = get_client()
+            raw = client.get_adgroup(advertiser_id, adgroup_id)
+            items = raw.get("list", []) if isinstance(raw, dict) else []
+            cache.feed_adgroups(items)
+            campaign_id = cache.get_adgroup_campaign(adgroup_id)
+            if campaign_id is None and items:
+                campaign_id = items[0].get("campaign_id") if isinstance(items[0], dict) else None
+            if campaign_id is None:
+                return "MANUAL"
+        automation_type = cache.get_campaign_automation_type(campaign_id)
+        if automation_type is None:
+            client = get_client()
+            raw = client.get_campaign(advertiser_id, str(campaign_id))
+            items = raw.get("list", []) if isinstance(raw, dict) else []
+            cache.feed_campaigns(items)
+            automation_type = cache.get_campaign_automation_type(campaign_id)
+        return automation_type if automation_type is not None else "MANUAL"
+
     @mcp.tool()
     def update_adgroup(
         advertiser_id: str,
@@ -109,11 +136,16 @@ def register_tools(mcp: FastMCP) -> None:
         """
         Update simple properties of an ad group.
 
+        Endpoint is chosen by the campaign's campaign_automation_type (MANUAL,
+        SMART_PLUS, or UPGRADED_SMART_PLUS), resolved from cache or by fetching
+        adgroup then campaign if not cached.
+
         Args:
             advertiser_id: TikTok advertiser (account) ID that owns the ad group.
             adgroup_id: ID of the ad group to update.
         """
         client = get_client()
+        campaign_automation_type = _resolve_campaign_automation_type(advertiser_id, adgroup_id)
         data: Dict[str, Any] = {"adgroup_id": adgroup_id}
         if name is not None:
             data["adgroup_name"] = name
@@ -123,7 +155,7 @@ def register_tools(mcp: FastMCP) -> None:
             data["budget"] = budget
 
         try:
-            raw = client.update_adgroup(advertiser_id, data)
+            raw = client.update_adgroup(advertiser_id, data, campaign_automation_type=campaign_automation_type)
             if operation_status is not None:
                 status_payload = {
                     "adgroup_ids": [adgroup_id],
