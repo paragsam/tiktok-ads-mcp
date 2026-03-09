@@ -116,6 +116,18 @@ def register_tools(mcp: FastMCP) -> None:
 
         return raw
 
+    def _resolve_campaign_automation_type(advertiser_id: str, campaign_id: str) -> str:
+        """Resolve campaign_automation_type (MANUAL | SMART_PLUS | UPGRADED_SMART_PLUS) from cache or by fetching campaign."""
+        cache = get_entity_cache()
+        automation_type = cache.get_campaign_automation_type(campaign_id)
+        if automation_type is None:
+            client = get_client()
+            raw = client.get_campaign(advertiser_id, campaign_id)
+            items = raw.get("list", []) if isinstance(raw, dict) else []
+            cache.feed_campaigns(items)
+            automation_type = cache.get_campaign_automation_type(campaign_id)
+        return automation_type if automation_type is not None else "MANUAL"
+
     @mcp.tool()
     def update_campaign(
         advertiser_id: str,
@@ -127,6 +139,10 @@ def register_tools(mcp: FastMCP) -> None:
         """
         Update simple properties of a campaign.
 
+        Endpoint is chosen by the campaign's campaign_automation_type (MANUAL,
+        SMART_PLUS, or UPGRADED_SMART_PLUS), resolved from cache or by fetching
+        the campaign if not cached.
+
         Args:
             advertiser_id: TikTok advertiser (account) ID that owns the campaign.
             campaign_id: ID of the campaign to update.
@@ -135,6 +151,7 @@ def register_tools(mcp: FastMCP) -> None:
             operation_status: Optional new status (ENABLE / DISABLE).
         """
         client = get_client()
+        campaign_automation_type = _resolve_campaign_automation_type(advertiser_id, campaign_id)
         data: Dict[str, Any] = {"campaign_id": campaign_id}
         if name is not None:
             data["campaign_name"] = name
@@ -142,7 +159,7 @@ def register_tools(mcp: FastMCP) -> None:
             data["budget"] = budget
 
         try:
-            raw = client.update_campaign(advertiser_id, data)
+            raw = client.update_campaign(advertiser_id, data, campaign_automation_type=campaign_automation_type)
             if operation_status is not None:
                 status_payload = {
                     "campaign_ids": [campaign_id],

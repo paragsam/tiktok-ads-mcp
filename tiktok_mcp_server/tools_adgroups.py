@@ -30,6 +30,30 @@ def _summarise_adgroups(raw_data: Any) -> List[AdGroupSummary]:
     return summaries
 
 
+def _resolve_campaign_automation_type(advertiser_id: str, adgroup_id: str) -> str:
+    """Resolve campaign_automation_type (MANUAL | SMART_PLUS | UPGRADED_SMART_PLUS) from cache or by fetching adgroup then campaign."""
+    cache = get_entity_cache()
+    campaign_id = cache.get_adgroup_campaign(adgroup_id)
+    if campaign_id is None:
+        client = get_client()
+        raw = client.get_adgroup(advertiser_id, adgroup_id)
+        items = raw.get("list", []) if isinstance(raw, dict) else []
+        cache.feed_adgroups(items)
+        campaign_id = cache.get_adgroup_campaign(adgroup_id)
+        if campaign_id is None and items:
+            campaign_id = items[0].get("campaign_id") if isinstance(items[0], dict) else None
+        if campaign_id is None:
+            return "MANUAL"
+    automation_type = cache.get_campaign_automation_type(campaign_id)
+    if automation_type is None:
+        client = get_client()
+        raw = client.get_campaign(advertiser_id, str(campaign_id))
+        items = raw.get("list", []) if isinstance(raw, dict) else []
+        cache.feed_campaigns(items)
+        automation_type = cache.get_campaign_automation_type(campaign_id)
+    return automation_type if automation_type is not None else "MANUAL"
+
+
 def register_tools(mcp: FastMCP) -> None:
     """
     Register adgroup-related tools on the given FastMCP instance.
@@ -100,29 +124,6 @@ def register_tools(mcp: FastMCP) -> None:
             raise RuntimeError(f"Failed to create ad group: {exc}") from exc
 
         return raw
-
-    def _resolve_campaign_automation_type(advertiser_id: str, adgroup_id: str) -> str:
-        """Resolve campaign_automation_type (MANUAL | SMART_PLUS | UPGRADED_SMART_PLUS) from cache or by fetching adgroup then campaign."""
-        cache = get_entity_cache()
-        campaign_id = cache.get_adgroup_campaign(adgroup_id)
-        if campaign_id is None:
-            client = get_client()
-            raw = client.get_adgroup(advertiser_id, adgroup_id)
-            items = raw.get("list", []) if isinstance(raw, dict) else []
-            cache.feed_adgroups(items)
-            campaign_id = cache.get_adgroup_campaign(adgroup_id)
-            if campaign_id is None and items:
-                campaign_id = items[0].get("campaign_id") if isinstance(items[0], dict) else None
-            if campaign_id is None:
-                return "MANUAL"
-        automation_type = cache.get_campaign_automation_type(campaign_id)
-        if automation_type is None:
-            client = get_client()
-            raw = client.get_campaign(advertiser_id, str(campaign_id))
-            items = raw.get("list", []) if isinstance(raw, dict) else []
-            cache.feed_campaigns(items)
-            automation_type = cache.get_campaign_automation_type(campaign_id)
-        return automation_type if automation_type is not None else "MANUAL"
 
     @mcp.tool()
     def update_adgroup(

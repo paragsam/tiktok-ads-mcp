@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
@@ -25,36 +26,66 @@ logger = logging.getLogger("tiktok_mcp_server.http")
 _BODY_TRUNCATE = 200
 
 
+def _verbose_http() -> bool:
+    """True when TIKTOK_ADS_VERBOSE is set (e.g. via --verbose CLI)."""
+    return os.environ.get("TIKTOK_ADS_VERBOSE", "").strip() in ("1", "true", "yes")
+
+
 def _truncate(body: bytes) -> bytes:
     if len(body) <= _BODY_TRUNCATE:
         return body
     return body[:_BODY_TRUNCATE] + b"..."
 
+
+def _headers_to_log_string(headers: httpx.Headers) -> str:
+    return "\n    ".join(f"{k}: {v}" for k, v in sorted(headers.items()))
+
+
 def _log_request(request: httpx.Request) -> None:
-    """Event hook: log method, URL, and request body (truncated)."""
+    """Event hook: log method, URL, and request body (truncated unless verbose)."""
     body = request.content or b""
-    logger.info(
-        "TikTok API request: %s %s  body=%s",
-        request.method,
-        request.url,
-        _truncate(body),
-    )
+    if _verbose_http():
+        logger.info(
+            "TikTok API request: %s %s\n  Request headers:\n    %s\n  Request body: %s",
+            request.method,
+            request.url,
+            _headers_to_log_string(request.headers),
+            body,
+        )
+    else:
+        logger.info(
+            "TikTok API request: %s %s  body=%s",
+            request.method,
+            request.url,
+            _truncate(body),
+        )
 
 
 def _log_response(response: httpx.Response) -> None:
-    """Event hook: log response body only (truncated)."""
+    """Event hook: log response (truncated body unless verbose; no headers unless verbose)."""
     try:
         response.read()  # consume stream so content is available for logging and later .json()
     except Exception:
         pass
     body = response.content or b""
-    logger.info(
-        "TikTok API response: %s %s -> %d  body=%s",
-        response.request.method,
-        response.request.url,
-        response.status_code,
-        _truncate(body),
-    )
+    if _verbose_http():
+        logger.info(
+            "TikTok API response: %s %s -> %d %s\n  Response headers:\n    %s\n  Response body: %s",
+            response.request.method,
+            response.request.url,
+            response.status_code,
+            response.reason_phrase or "",
+            _headers_to_log_string(response.headers),
+            body,
+        )
+    else:
+        logger.info(
+            "TikTok API response: %s %s -> %d  body=%s",
+            response.request.method,
+            response.request.url,
+            response.status_code,
+            _truncate(body),
+        )
 
 
 class TikTokApiError(RuntimeError):
@@ -177,15 +208,35 @@ class TikTokClient:
         response = self._client.post("/campaign/create/", json=body)
         return self._handle_response(response)
 
-    def update_campaign(self, advertiser_id: str, payload: Dict[str, Any]) -> Any:
+    def update_campaign(
+        self,
+        advertiser_id: str,
+        payload: Dict[str, Any],
+        *,
+        campaign_automation_type: str = "MANUAL",
+    ) -> Any:
         """
         Update a campaign.
 
-        Maps to POST /campaign/update/
+        Endpoint is chosen by campaign_automation_type:
+        - MANUAL: POST /campaign/update/
+        - SMART_PLUS | UPGRADED_SMART_PLUS: POST /smart_plus/campaign/update/
         """
         body = dict(payload)
         body.setdefault("advertiser_id", advertiser_id)
-        response = self._client.post("/campaign/update/", json=body)
+        at = (campaign_automation_type or "").strip().upper()
+        if at == "MANUAL":
+            path = "/campaign/update/"
+        elif at in ("SMART_PLUS", "UPGRADED_SMART_PLUS"):
+            path = "/smart_plus/campaign/update/"
+        else:
+            path = "/campaign/update/"
+        logger.info(
+            "update_campaign called with campaign_automation_type=%r (endpoint=%s)",
+            campaign_automation_type,
+            path,
+        )
+        response = self._client.post(path, json=body)
         return self._handle_response(response)
 
     def update_campaign_status(self, advertiser_id: str, payload: Dict[str, Any]) -> Any:
@@ -320,26 +371,80 @@ class TikTokClient:
         response = self._client.get("/ad/get/", params=self._with_advertiser(advertiser_id, params))
         return self._handle_response(response)
 
-    def create_ad(self, advertiser_id: str, payload: Dict[str, Any]) -> Any:
+    def get_ad(self, advertiser_id: str, ad_id: str) -> Any:
+        """
+        Get a single ad by ID. Returns same shape as list_ads (data with list, page_info).
+        Maps to GET /ad/get/ with filtering ad_ids.
+        """
+        params: Dict[str, Any] = {"filtering": json.dumps({"ad_ids": [ad_id]})}
+        response = self._client.get("/ad/get/", params=self._with_advertiser(advertiser_id, params))
+        return self._handle_response(response)
+
+    def create_ad(
+        self,
+        advertiser_id: str,
+        payload: Dict[str, Any],
+        *,
+        campaign_automation_type: str = "MANUAL",
+    ) -> Any:
         """
         Create an ad.
 
-        Maps to POST /ad/create/
+        Endpoint is chosen by campaign_automation_type:
+        - MANUAL: POST /ad/create/
+        - SMART_PLUS | UPGRADED_SMART_PLUS: POST /smart_plus/ad/create/
         """
         body = dict(payload)
         body.setdefault("advertiser_id", advertiser_id)
-        response = self._client.post("/ad/create/", json=body)
+        at = (campaign_automation_type or "").strip().upper()
+        if at == "MANUAL":
+            path = "/ad/create/"
+        elif at in ("SMART_PLUS", "UPGRADED_SMART_PLUS"):
+            path = "/smart_plus/ad/create/"
+        else:
+            path = "/ad/create/"
+        logger.info(
+            "create_ad called with campaign_automation_type=%r (endpoint=%s)",
+            campaign_automation_type,
+            path,
+        )
+        response = self._client.post(path, json=body)
         return self._handle_response(response)
 
-    def update_ad(self, advertiser_id: str, payload: Dict[str, Any]) -> Any:
+    def update_ad(
+        self,
+        advertiser_id: str,
+        payload: Dict[str, Any],
+        *,
+        campaign_automation_type: str = "MANUAL",
+    ) -> Any:
         """
         Update an ad.
 
-        Maps to POST /ad/update/
+        Endpoint is chosen by campaign_automation_type:
+        - MANUAL: POST /ad/update/ (body uses ad_id)
+        - SMART_PLUS | UPGRADED_SMART_PLUS: POST /smart_plus/ad/update/ (body uses smart_plus_ad_id per API)
+        See: https://business-api.tiktok.com/portal/docs?id=1843317390059522
         """
         body = dict(payload)
         body.setdefault("advertiser_id", advertiser_id)
-        response = self._client.post("/ad/update/", json=body)
+        at = (campaign_automation_type or "").strip().upper()
+        if at == "MANUAL":
+            path = "/ad/update/"
+        elif at in ("SMART_PLUS", "UPGRADED_SMART_PLUS"):
+            path = "/smart_plus/ad/update/"
+            # Smart+ ad update requires smart_plus_ad_id (same ID value as ad_id)
+            ad_id = body.get("ad_id")
+            if ad_id is not None:
+                body["smart_plus_ad_id"] = ad_id
+        else:
+            path = "/ad/update/"
+        logger.info(
+            "update_ad called with campaign_automation_type=%r (endpoint=%s)",
+            campaign_automation_type,
+            path,
+        )
+        response = self._client.post(path, json=body)
         return self._handle_response(response)
 
     def update_ad_status(self, advertiser_id: str, payload: Dict[str, Any]) -> Any:

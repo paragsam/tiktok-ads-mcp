@@ -7,27 +7,45 @@ This module wires together:
 
 Run with:
     python -m tiktok_mcp_server.server
+    python -m tiktok_mcp_server.server --verbose   # full HTTP request/response, no header redaction
 """
 
 from __future__ import annotations
 
+import argparse
 import logging
 import os
+import sys
 
 from mcp.server.fastmcp import FastMCP
 
 from . import tools_ads, tools_adgroups, tools_campaigns, tools_reporting
 
 
-def _configure_http_logging() -> None:
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="TikTok Ads MCP server")
+    parser.add_argument(
+        "--verbose",
+        "-v",
+        action="store_true",
+        help="Verbose logging: log full HTTP request/response and all headers (no redaction)",
+    )
+    return parser.parse_args()
+
+
+def _configure_http_logging(verbose: bool = False) -> None:
     """
     Configure logging for TikTok API HTTP request/response debugging.
     Logs go to stderr so they do not interfere with MCP stdio protocol.
-    Set TIKTOK_ADS_HTTP_DEBUG=1 for DEBUG level (e.g. request body).
+    Set TIKTOK_ADS_HTTP_DEBUG=1 for DEBUG level, or pass --verbose for full request/response.
     """
+    if verbose:
+        os.environ["TIKTOK_ADS_VERBOSE"] = "1"
+    elif "TIKTOK_ADS_VERBOSE" in os.environ:
+        del os.environ["TIKTOK_ADS_VERBOSE"]
     http_logger = logging.getLogger("tiktok_mcp_server.http")
     if not http_logger.handlers:
-        handler = logging.StreamHandler()
+        handler = logging.StreamHandler(sys.stderr)
         handler.setFormatter(
             logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
         )
@@ -55,9 +73,10 @@ def main() -> None:
     Start the MCP server.
 
     The default transport is stdio, which is what most MCP clients expect.
-    HTTP request/response logging (headers) goes to stderr for debugging.
+    Use --verbose to log full HTTP request/response and all headers (no redaction).
     """
-    _configure_http_logging()
+    args = _parse_args()
+    _configure_http_logging(verbose=args.verbose)
     app = create_app()
     app.run()
 

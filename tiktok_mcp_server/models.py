@@ -7,7 +7,7 @@ without trying to mirror every field in the TikTok API.
 
 from __future__ import annotations
 
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
@@ -47,6 +47,7 @@ class AdSummary(BaseModel):
     status: Optional[str] = Field(default=None, alias="ad_status")
     campaign_id: Optional[str] = None
     adgroup_id: Optional[str] = None
+    creative_info: Optional[List[Dict]] = Field(default=None, description="Creative info (Smart+ and others).")
     raw: Dict = Field(default_factory=dict, description="Raw TikTok ad payload.")
 
 
